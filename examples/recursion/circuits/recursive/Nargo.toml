@@ -1,0 +1,9 @@
+[package]
+name = "recursive"
+type = "bin"
+compiler_version = ">=1.0.0"
+
+[dependencies]
+# Pin this tag to the aztec-packages release matching your installed bb
+# (check with `bb --version` / `python -m noir_bb.doctor`).
+bb_proof_verification = { git = "https://github.com/AztecProtocol/aztec-packages/", tag = "v4.1.1", directory = "barretenberg/noir/bb_proof_verification" }

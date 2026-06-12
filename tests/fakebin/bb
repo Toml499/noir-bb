@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""Fake `bb` for tests.
+
+Emulates the file side-effects and exit codes of the Barretenberg CLI in two
+dialects:
+
+* modern (default)            -- bb >= 4.x:  --verifier_target, --write_vk,
+                                 --output_format binary|json; prove requires a
+                                 vk (-k) or --write_vk, like the real 4.x CLI
+* legacy (BB_FAKE_LEGACY=1)   -- bb 0.8x:    --oracle_hash, --honk_recursion,
+                                 --zk, --output_format bytes|fields|bytes_and_fields
+
+Proofs are deterministic hashes, sized like real UltraHonk artifacts
+(449 fields non-ZK / 500 ZK, 115 vk fields). The first proof field embeds the
+circuit's vk hash so `verify` can succeed/fail honestly. Every subcommand also
+drops a `bb_invocation.json` into the output dir so tests can assert on the
+exact flags the library produced.
+"""
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+LEGACY = os.environ.get("BB_FAKE_LEGACY") == "1"
+VERSION = "0.87.0-fake" if LEGACY else "v4.0.0-fake.1"
+
+N_VK_FIELDS = 115
+N_PROOF_NO_ZK = 449
+N_PROOF_ZK = 500
+N_PUBLIC_INPUTS = 1
+
+VALUE_FLAGS = {
+    "-b", "--bytecode_path", "-w", "--witness_path", "-o", "--output_path",
+    "-p", "--proof_path", "-i", "--public_inputs_path", "-k", "--vk_path",
+    "-t", "--verifier_target", "--oracle_hash", "--honk_recursion",
+    "--output_format", "-s", "--scheme", "-c", "--crs_path",
+}
+BOOL_FLAGS = {
+    "--write_vk", "--verify", "--zk", "--disable_zk", "--ipa_accumulation",
+    "-v", "--verbose", "--init_kzg_accumulator", "-h", "--help",
+}
+
+MODERN_HELP = {
+    "prove": """Generate a proof.
+Options:
+  -b, --bytecode_path        Path to ACIR bytecode
+  -w, --witness_path         Path to witness
+  -o, --output_path          Output directory
+  -k, --vk_path              Path to a verification key
+  -s, --scheme               Proving scheme: ultra_honk (default), chonk, avm
+  -c, --crs_path             Path to CRS directory
+  -t, --verifier_target      One of: evm, evm-no-zk, noir-recursive,
+                             noir-recursive-no-zk, noir-rollup,
+                             noir-rollup-no-zk, starknet, starknet-no-zk
+      --oracle_hash          DEPRECATED, use --verifier_target
+      --disable_zk           DEPRECATED, use --verifier_target
+      --ipa_accumulation     DEPRECATED, use --verifier_target
+      --write_vk             Also write the verification key
+      --verify               Self-verify the proof after proving
+      --output_format        Format: 'binary' (default), 'json'
+""",
+    "write_vk": """Write the verification key.
+Options:
+  -b, --bytecode_path        Path to ACIR bytecode
+  -o, --output_path          Output directory
+  -s, --scheme               Proving scheme
+  -c, --crs_path             Path to CRS directory
+  -t, --verifier_target      Verifier target
+      --output_format        Format: 'binary' (default), 'json'
+""",
+    "verify": """Verify a proof.
+Options:
+  -p, --proof_path           Path to proof
+  -i, --public_inputs_path   Path to public inputs
+  -k, --vk_path              Path to verification key
+  -s, --scheme               Proving scheme
+  -c, --crs_path             Path to CRS directory
+  -t, --verifier_target      Verifier target
+""",
+    "gates": """Print gate counts.
+Options:
+  -b, --bytecode_path        Path to ACIR bytecode
+  -s, --scheme               Proving scheme
+""",
+    "write_solidity_verifier": """Write a Solidity verifier contract.
+Options:
+  -k, --vk_path              Path to verification key
+  -o, --output_path          Output file
+  -t, --verifier_target      Verifier target
+""",
+}
+
+LEGACY_HELP = {
+    "prove": """Generate a proof.
+Options:
+  -b, --bytecode_path        Path to ACIR bytecode
+  -w, --witness_path         Path to witness
+  -o, --output_path          Output directory
+  -c, --crs_path             Path to CRS directory
+      --oracle_hash          Hash for Fiat-Shamir: poseidon2 (default), keccak, starknet
+      --honk_recursion       0|1|2 recursion level
+      --zk                   Use the ZK variant of the prover
+      --output_format        bytes (default), fields, bytes_and_fields
+""",
+    "write_vk": """Write the verification key.
+Options:
+  -b, --bytecode_path        Path to ACIR bytecode
+  -o, --output_path          Output directory
+  -c, --crs_path             Path to CRS directory
+      --oracle_hash          Hash for Fiat-Shamir
+      --honk_recursion       0|1|2 recursion level
+      --output_format        bytes (default), fields, bytes_and_fields
+""",
+    "verify": """Verify a proof.
+Options:
+  -p, --proof_path           Path to proof
+  -k, --vk_path              Path to verification key
+  -c, --crs_path             Path to CRS directory
+      --oracle_hash          Hash for Fiat-Shamir
+      --honk_recursion       0|1|2 recursion level
+      --zk                   Verify the ZK variant
+""",
+    "gates": """Print gate counts.
+Options:
+  -b, --bytecode_path        Path to ACIR bytecode
+""",
+    "write_solidity_verifier": """Write a Solidity verifier contract.
+Options:
+  -k, --vk_path              Path to verification key
+  -o, --output_path          Output file
+      --oracle_hash          Hash for Fiat-Shamir
+      --zk                   ZK variant
+""",
+}
+
+
+def fail(msg, code=2):
+    print(f"bb error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def parse(args):
+    flags, i = {}, 0
+    while i < len(args):
+        a = args[i]
+        if a in VALUE_FLAGS:
+            if i + 1 >= len(args):
+                fail(f"flag {a} expects a value")
+            flags[a] = args[i + 1]
+            i += 2
+        elif a in BOOL_FLAGS:
+            flags[a] = True
+            i += 1
+        else:
+            fail(f"unknown argument {a}")
+    return flags
+
+
+def opt(flags, *names, default=None):
+    for n in names:
+        if n in flags:
+            return flags[n]
+    return default
+
+
+def mask(digest: bytes) -> bytes:
+    b = bytearray(digest)
+    b[0] &= 0x0F  # keep value comfortably below the BN254 modulus
+    return bytes(b)
+
+
+def h(*parts: bytes) -> bytes:
+    return mask(hashlib.sha256(b":".join(parts)).digest())
+
+
+def hexf(b: bytes) -> str:
+    return "0x" + b.hex()
+
+
+def circuit_hashes(bytecode_path):
+    p = Path(bytecode_path)
+    if not p.is_file():
+        fail(f"bytecode not found: {p}")
+    try:
+        bytecode = json.loads(p.read_text()).get("bytecode", "")
+    except json.JSONDecodeError:
+        bytecode = p.read_bytes().hex()
+    vk_hash = h(b"vkhash", bytecode.encode())
+    return bytecode.encode(), vk_hash
+
+
+def vk_fields(bytecode: bytes):
+    return [hexf(h(b"vk", bytecode, str(i).encode())) for i in range(N_VK_FIELDS)]
+
+
+def proof_fields(vk_hash: bytes, witness: bytes, n: int):
+    pi = h(b"pubs", witness)
+    flds = [hexf(vk_hash)]
+    flds += [hexf(h(b"prf", vk_hash, pi, str(i).encode())) for i in range(1, n)]
+    return flds, [hexf(pi)]
+
+
+def fields_to_bin(fields):
+    return b"".join(bytes.fromhex(f[2:]) for f in fields)
+
+
+def record_invocation(outdir, cmd):
+    try:
+        (Path(outdir) / "bb_invocation.json").write_text(
+            json.dumps({"cmd": cmd, "argv": sys.argv[1:], "legacy": LEGACY})
+        )
+    except OSError:
+        pass
+
+
+def write_vk_files(outdir, bytecode, vk_hash, fmt):
+    out = Path(outdir)
+    flds = vk_fields(bytecode)
+    if not LEGACY and fmt == "json":
+        (out / "vk.json").write_text(json.dumps(
+            {"vk": flds, "hash": hexf(vk_hash),
+             "bb_version": VERSION.lstrip("v"), "scheme": "ultra_honk"}))
+        return
+    (out / "vk").write_bytes(b"VKBIN" + vk_hash)
+    (out / "vk_hash").write_bytes(vk_hash)
+    if LEGACY and fmt in ("fields", "bytes_and_fields"):
+        (out / "vk_fields.json").write_text(json.dumps(flds))
+
+
+def do_prove(flags):
+    bytecode, vk_hash = circuit_hashes(opt(flags, "-b", "--bytecode_path"))
+    wpath = Path(opt(flags, "-w", "--witness_path", default=""))
+    if not wpath.is_file():
+        fail(f"witness not found: {wpath}")
+    outdir = Path(opt(flags, "-o", "--output_path", default="."))
+    outdir.mkdir(parents=True, exist_ok=True)
+    record_invocation(outdir, "prove")
+
+    if LEGACY:
+        zk = bool(opt(flags, "--zk"))
+        fmt = opt(flags, "--output_format", default="bytes")
+    else:
+        target = opt(flags, "-t", "--verifier_target", default="noir-recursive")
+        zk = not target.endswith("-no-zk") and not opt(flags, "--disable_zk")
+        fmt = opt(flags, "--output_format", default="binary")
+        vk_in = opt(flags, "-k", "--vk_path")
+        if vk_in:
+            if extract_vk_hash(Path(vk_in)) != hexf(vk_hash):
+                fail("Invalid verification key!", code=1)
+        elif not opt(flags, "--write_vk"):
+            fail("Unable to open file: ./target/vk", code=1)
+
+    n = N_PROOF_ZK if zk else N_PROOF_NO_ZK
+    flds, pubs = proof_fields(vk_hash, wpath.read_bytes(), n)
+
+    if not LEGACY and fmt == "json":
+        (outdir / "proof.json").write_text(json.dumps(
+            {"proof": flds, "vk_hash": hexf(vk_hash),
+             "bb_version": VERSION.lstrip("v"), "scheme": "ultra_honk"}))
+        (outdir / "public_inputs.json").write_text(json.dumps(
+            {"public_inputs": pubs, "bb_version": VERSION.lstrip("v"),
+             "scheme": "ultra_honk"}))
+    else:
+        if fmt in ("bytes", "binary", "bytes_and_fields"):
+            (outdir / "proof").write_bytes(fields_to_bin(flds))
+            (outdir / "public_inputs").write_bytes(fields_to_bin(pubs))
+        if LEGACY and fmt in ("fields", "bytes_and_fields"):
+            (outdir / "proof_fields.json").write_text(json.dumps(flds))
+            (outdir / "public_inputs_fields.json").write_text(json.dumps(pubs))
+
+    if not LEGACY and opt(flags, "--write_vk"):
+        write_vk_files(outdir, bytecode, vk_hash, fmt)
+    print("Proof saved")
+
+
+def do_write_vk(flags):
+    bytecode, vk_hash = circuit_hashes(opt(flags, "-b", "--bytecode_path"))
+    outdir = Path(opt(flags, "-o", "--output_path", default="."))
+    outdir.mkdir(parents=True, exist_ok=True)
+    record_invocation(outdir, "write_vk")
+    default_fmt = "bytes" if LEGACY else "binary"
+    fmt = opt(flags, "--output_format", default=default_fmt)
+    write_vk_files(outdir, bytecode, vk_hash, fmt)
+    print("VK saved")
+
+
+def extract_proof_vk_hash(path: Path) -> str:
+    if not path.is_file():
+        fail(f"proof not found: {path}")
+    if path.suffix == ".json":
+        data = json.loads(path.read_text())
+        if "vk_hash" in data:
+            return data["vk_hash"]
+        flds = data.get("proof") or data
+        return flds[0]
+    raw = path.read_bytes()
+    if path.name.endswith("_fields.json") or raw[:1] == b"[":
+        return json.loads(raw)[0]
+    return hexf(raw[:32])
+
+
+def extract_vk_hash(path: Path) -> str:
+    if not path.is_file():
+        fail(f"vk not found: {path}")
+    raw = path.read_bytes()
+    if raw.startswith(b"VKBIN"):
+        return hexf(raw[5:37])
+    if path.suffix == ".json":
+        data = json.loads(raw)
+        if isinstance(data, dict) and "hash" in data:
+            return data["hash"]
+    fail(f"unrecognised vk file: {path}")
+
+
+def do_verify(flags):
+    proof_hash = extract_proof_vk_hash(Path(opt(flags, "-p", "--proof_path", default="")))
+    vk_hash = extract_vk_hash(Path(opt(flags, "-k", "--vk_path", default="")))
+    if proof_hash == vk_hash:
+        print("Proof verified successfully")
+        sys.exit(0)
+    print("Proof verification failed", file=sys.stderr)
+    sys.exit(1)
+
+
+def do_gates(flags):
+    circuit_hashes(opt(flags, "-b", "--bytecode_path"))  # existence check
+    print(json.dumps({"functions": [{"acir_opcodes": 7, "circuit_size": 1024}]}, indent=2))
+
+
+def do_write_solidity_verifier(flags):
+    vk = Path(opt(flags, "-k", "--vk_path", default=""))
+    if not vk.is_file():
+        fail(f"vk not found: {vk}")
+    out = Path(opt(flags, "-o", "--output_path", default="Verifier.sol"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("// SPDX-License-Identifier: MIT\ncontract FakeHonkVerifier {}\n")
+    print(f"Solidity verifier saved to {out}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("--version", "-V"):
+        print(VERSION)
+        return
+    cmd, rest = args[0], args[1:]
+    helps = LEGACY_HELP if LEGACY else MODERN_HELP
+    if cmd in ("-h", "--help"):
+        print("bb (fake)\ncommands: " + ", ".join(helps))
+        return
+    if cmd not in helps:
+        fail(f"unknown command {cmd}")
+    if "-h" in rest or "--help" in rest:
+        print(helps[cmd])
+        return
+    flags = parse(rest)
+    {"prove": do_prove, "write_vk": do_write_vk, "verify": do_verify,
+     "gates": do_gates, "write_solidity_verifier": do_write_solidity_verifier}[cmd](flags)
+
+
+if __name__ == "__main__":
+    main()

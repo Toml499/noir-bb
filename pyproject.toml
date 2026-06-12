@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noir-bb"
+version = "0.1.0"
+description = "Pythonic wrapper around nargo and Barretenberg (bb) for executing, proving and verifying Noir circuits — including recursive proofs."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Thomas Végh" }]
+keywords = ["noir", "barretenberg", "zero-knowledge", "zk", "ultrahonk", "recursion"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/toml499/noir-bb"
+Issues = "https://github.com/toml499/noir-bb/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+noir_bb = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

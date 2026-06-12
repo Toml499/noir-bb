@@ -1,0 +1,4 @@
+# Ship a runnable test suite in the sdist (fake toolchain included).
+graft tests
+prune tests/.pytest_cache
+global-exclude __pycache__ *.py[cod] .DS_Store

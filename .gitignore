@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Generated Noir/bb artifacts in the examples
+examples/**/target/
+examples/recursion/proofs/
+examples/**/Prover_noirbb.toml
