@@ -57,10 +57,50 @@ class CommandResult:
     stderr: str
     duration: float = 0.0
     extra: dict = field(default_factory=dict)
+    stdout_bytes: bytes = b""
 
     @property
     def text(self) -> str:
         return (self.stdout + "\n" + self.stderr).strip()
+
+
+def run_binary(
+    cmd: Sequence[PathLike],
+    *,
+    input_bytes: bytes,
+    timeout: Optional[float] = None,
+    check: bool = True,
+) -> CommandResult:
+    """Run a command with binary stdin, capturing stdout as raw bytes.
+
+    Used for the ``bb msgpack run`` transport, whose stdin and stdout are framed
+    binary MessagePack rather than text. stderr is still decoded as text (bb logs
+    human-readable diagnostics there).
+    """
+    argv = [str(c) for c in cmd]
+    log.debug("running (binary): %s", " ".join(argv))
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            argv, input=input_bytes, capture_output=True, timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise ToolNotFoundError(f"Executable not found: {argv[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CommandError(
+            f"Command timed out after {timeout}s", cmd=argv, returncode=None,
+            stdout="", stderr=(exc.stderr or b"").decode("utf-8", "replace"),
+        ) from exc
+    duration = time.monotonic() - start
+    stderr = proc.stderr.decode("utf-8", "replace")
+    result = CommandResult(argv, proc.returncode, "", stderr, duration, stdout_bytes=proc.stdout)
+    log.debug("finished in %.2fs (rc=%d)", duration, proc.returncode)
+    if check and proc.returncode != 0:
+        raise CommandError(
+            f"`{Path(argv[0]).name} {argv[1] if len(argv) > 1 else ''}` failed",
+            cmd=argv, returncode=proc.returncode, stdout="", stderr=stderr,
+        )
+    return result
 
 
 def run(

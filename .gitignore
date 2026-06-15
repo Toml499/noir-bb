@@ -15,5 +15,5 @@ dist/
 
 # Generated Noir/bb artifacts in the examples
 examples/**/target/
-examples/recursion/proofs/
+examples/**/proofs/
 examples/**/Prover_noirbb.toml

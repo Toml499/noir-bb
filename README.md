@@ -51,7 +51,45 @@ which prints both versions, whether your `bb` speaks the modern `--verifier_targ
 
 bb >= 4.x requires `prove` to be given a verification key. `prove()` handles this transparently: with no arguments it adds `--write_vk` so bb emits the key alongside the proof (and `.vk` is populated), and for the faster path you can precompute the key once and reuse it — `vk = bb.write_vk(circuit, "vk/"); bb.prove(circuit, witness, "proof/", vk=vk)` — which becomes `bb prove -k`.
 
-`recursive_inputs(proof)` then produces exactly the dict the outer circuit from noir-examples expects: `{"verification_key", "proof", "public_inputs", "key_hash"}`.
+`recursive_inputs(proof)` then produces exactly the dict the outer circuit from noir-examples expects: `{"verification_key", "proof", "public_inputs", "key_hash"}`. Pass `include_key_hash=False` for tutorial-style outer circuits that hardcode the key hash (three ABI inputs), and `circuit=project.circuit_json` to size-check the artifacts against the outer circuit's actual ABI instead of hardcoded constants.
+
+## Talking bb's API directly: the msgpack backend (bb.js parity)
+
+`@aztec/bb.js` is not a separate prover — it is a thin client over the same Barretenberg API the `bb` binary exposes under `bb msgpack run`. `UltraHonkBackend.generateProof` sends a `CircuitProve` command, `getVerificationKey` sends `CircuitComputeVk`, and the proof, public inputs and verification key come back **already as field elements** (what `deflattenFields` and `acirVkAsFieldsUltraHonk` return in JS).
+
+`noir_bb.MsgpackBackend` is the Python counterpart of that client: it speaks the identical wire protocol to `bb msgpack run` rather than shelling the CLI. This matters because the trimmed-down CLI on the 3.0.x/4.0.x **nightlies drops `--output_format`**, so the CLI cannot emit the vk as fields — but the msgpack API still can, so recursion works there:
+
+```python
+from noir_bb import (NoirProject, MsgpackBackend,
+                     deflatten_fields, acir_vk_as_fields_ultra_honk, recursive_inputs)
+
+main_noir = NoirProject("circuits/main")
+recursive_noir = NoirProject("circuits/recursive")
+
+main_backend = MsgpackBackend(main_noir.circuit_json, threads=8, recursive=True)   # inner
+recursive_backend = MsgpackBackend(recursive_noir.circuit_json, recursive=False)   # outer
+
+w = main_noir.execute({"x": 1, "y": 2})
+proof = main_backend.generate_proof(w.witness_path)     # CircuitProve  -> proof+pubs as fields
+vk = main_backend.get_verification_key()                # CircuitComputeVk -> vk as fields
+assert main_backend.verify_proof(proof)                 # CircuitVerify
+
+inputs = recursive_inputs(proof, circuit=recursive_noir.circuit_json)
+w2 = recursive_noir.execute(inputs)
+rec = recursive_backend.generate_proof(w2.witness_path)
+assert recursive_backend.verify_proof(rec)
+```
+
+| bb.js | noir-bb (`MsgpackBackend`) | bb command |
+| --- | --- | --- |
+| `new UltraHonkBackend(bytecode, {threads}, {recursive})` | `MsgpackBackend(circuit, threads=…, recursive=…)` | — |
+| `backend.generateProof(witness)` | `backend.generate_proof(witness)` | `CircuitProve` |
+| `backend.getVerificationKey()` | `backend.get_verification_key()` | `CircuitComputeVk` |
+| `deflattenFields(proofData.proof)` | `deflatten_fields(proof)` | — |
+| `barretenberg.acirVkAsFieldsUltraHonk(vk)` | `acir_vk_as_fields_ultra_honk(vk)` | — |
+| `backend.verifyProof(proofData)` | `backend.verify_proof(proof)` | `CircuitVerify` |
+
+The `recursive` flag picks the recursion-friendly default target (`noir-recursive`: poseidon2 oracle, ZK) for the inner backend and `evm` for the outer; pass `verifier_target=…` to override per call (the same knob as bb.js's `{ verifierTarget }`). The codec is a small dependency-free MessagePack implementation (`noir_bb._msgpack`), checked byte-for-byte against the reference `msgpack` package in the test-suite, so the library stays dependency-free.
 
 ## Recursion end-to-end
 
@@ -59,6 +97,12 @@ A complete, runnable port of the noir-examples recursion flow lives in [`example
 
 ```bash
 cd examples/recursion && python run_recursion.py
+```
+
+[`examples/recursive_aggregation`](examples/recursive_aggregation) is a second, self-contained port — of Barretenberg's [recursive aggregation tutorial](https://barretenberg.aztec.network/docs/how_to_guides/recursive_aggregation/) (`recursive.test.ts`) — driven through `MsgpackBackend` so it runs on the bb nightlies the CLI recursion path can't. `run_recursive_aggregation.py` mirrors the tutorial's TypeScript step for step; its outer `Nargo.toml` pins `bb_proof_verification` to the `v4.0.0-nightly.20260120` tag matching that bb (508-field ZK proof, 115-field vk).
+
+```bash
+cd examples/recursive_aggregation && python run_recursive_aggregation.py
 ```
 
 Recursion needs a bb that can emit the verification key as field elements (`--output_format json` or `bytes_and_fields`). Nightly builds (3.0.x/4.0.x) drop that flag entirely — `noir_bb.doctor()` tells you which category your bb is in; native prove/verify (the hello_world example) work everywhere.

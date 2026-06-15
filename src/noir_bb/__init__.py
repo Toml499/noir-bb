@@ -38,11 +38,20 @@ from .errors import (
     ToolNotFoundError,
     VersionError,
 )
+from .msgpack_api import (
+    MsgpackBackend,
+    MsgpackClient,
+    UltraHonkBackendApi,
+    acir_vk_as_fields_ultra_honk,
+    deflatten_fields,
+    settings_for,
+)
 from .nargo import ExecutionResult, Nargo, NoirProject
 from .recursion import (
     RECURSIVE_PROOF_LENGTH,
     RECURSIVE_ZK_PROOF_LENGTH,
     ULTRA_VK_LENGTH_IN_FIELDS,
+    check_against_circuit,
     check_recursive_artifacts,
     expected_proof_length,
     noir_verifier_snippet,
@@ -54,8 +63,11 @@ __version__ = "0.1.0"
 __all__ = [
     "Nargo", "NoirProject", "ExecutionResult",
     "Barretenberg", "UltraHonkBackend", "Capabilities", "VERIFIER_TARGETS",
+    "MsgpackBackend", "MsgpackClient", "UltraHonkBackendApi", "settings_for",
+    "deflatten_fields", "acir_vk_as_fields_ultra_honk",
     "Proof", "VerificationKey",
-    "recursive_inputs", "check_recursive_artifacts", "expected_proof_length",
+    "recursive_inputs", "check_recursive_artifacts", "check_against_circuit",
+    "expected_proof_length",
     "noir_verifier_snippet",
     "RECURSIVE_PROOF_LENGTH", "RECURSIVE_ZK_PROOF_LENGTH", "ULTRA_VK_LENGTH_IN_FIELDS",
     "dumps_prover_toml", "to_hex_field", "proof_bytes_to_fields", "fields_to_bytes",
@@ -89,18 +101,31 @@ def doctor(*, nargo_path=None, bb_path=None) -> str:
                else "bytes_and_fields" if caps.output_bytes_and_fields
                else "binary only")
         lines.append(f"fields output  : {fmt}")
+        msgpack_help = bb._help("msgpack")  # `bb msgpack run` API present?
+        msgpack = "run" in msgpack_help and "schema" in msgpack_help
+        lines.append(f"msgpack API    : {'yes (bb msgpack run)' if msgpack else 'no'}")
         if fmt == "binary only":
             lines.append(
-                "WARNING: this bb has no --output_format flag, so it cannot emit "
-                "the verification key as field elements from the CLI. The binary "
-                "vk is a structured serialization (not flat fields), so it cannot "
-                "be chunked either. Recursive composition (vk/proof as circuit "
-                "inputs) is NOT possible with this bb; proof fields can still be "
-                "recovered by 32-byte chunking, and native prove/verify work. "
-                "Nightlies (3.0.x, 4.0.x) are typically in this category — switch "
-                "to a stable release via bbup. Note that recursive proof lengths "
-                "also differ across these versions, so the bb_proof_verification "
-                "tag must match your bb."
+                "NOTE: this bb has no --output_format flag, so the *CLI* cannot "
+                "emit the verification key as field elements (the binary vk is a "
+                "structured serialization, not flat fields). The CLI-based "
+                "Barretenberg wrapper therefore cannot build recursion inputs on "
+                "this bb; proof fields are still recoverable by 32-byte chunking, "
+                "and native CLI prove/verify work. Nightlies (3.0.x, 4.0.x) are "
+                "typically in this category."
+            )
+            if msgpack:
+                lines.append(
+                    "  -> Use noir_bb.MsgpackBackend instead: it drives `bb msgpack "
+                    "run` (the same API bb.js uses) and gets proof- AND vk-as-fields "
+                    "directly, so recursion works on this bb. See "
+                    "examples/recursive_aggregation."
+                )
+            lines.append(
+                "  Recursive proof/vk field lengths differ across bb versions, so "
+                "the outer circuit's bb_proof_verification tag must match your bb "
+                "(noir_bb.recursive_inputs(..., circuit=...) checks this against "
+                "the compiled ABI)."
             )
         if not caps.modern:
             lines.append(

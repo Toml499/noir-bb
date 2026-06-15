@@ -13,6 +13,8 @@ exists precisely to catch that mismatch early with a readable error.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from .artifacts import Proof, VerificationKey
@@ -43,13 +45,28 @@ def recursive_inputs(
     vk: Optional[VerificationKey] = None,
     *,
     key_hash: Optional[Union[str, int]] = None,
+    include_key_hash: bool = True,
     check: bool = True,
+    circuit: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Build the input dict for an outer verifier circuit.
 
     Returns ``{"verification_key", "proof", "public_inputs", "key_hash"}`` —
-    exactly the parameter names used by the noir-examples recursive circuit —
-    ready to pass to ``NoirProject.execute()``.
+    the parameter names used by the noir-examples recursive circuit — ready to
+    pass to ``NoirProject.execute()``.
+
+    ``include_key_hash=False`` drops the ``key_hash`` entry, matching outer
+    circuits whose ABI has only three inputs because the key hash is hardcoded
+    in the circuit (e.g. ``verify_honk_proof(vk, proof, public_inputs, 0x0)`` in
+    the Barretenberg recursive-aggregation tutorial). The resulting dict is then
+    byte-for-byte the ``{ proof, public_inputs, verification_key }`` object that
+    bb.js's ``recursive_inputs`` snippet builds.
+
+    ``circuit`` (a :class:`~noir_bb.NoirProject`, an ``ExecutionResult``, or a
+    path to the compiled ``*.json``) checks the proof/vk/public-input lengths
+    against that circuit's actual ABI — version-independent, and preferable to
+    the hardcoded ``check`` against bb_proof_verification's constants, which
+    drift between bb releases.
     """
     vk = vk or proof.vk
     if vk is None:
@@ -62,20 +79,71 @@ def recursive_inputs(
             "proof has no field representation; generate it with "
             "output_format='json' (or 'bytes_and_fields' on legacy bb)"
         )
-    kh = key_hash if key_hash is not None else (vk.key_hash or proof.vk_hash)
-    if kh is None:
-        raise ArtifactError(
-            "no verification-key hash available; pass key_hash=... explicitly "
-            "(bb writes it into vk.json / the vk_hash file)"
-        )
-    if check and proof.verifier_target:
+    if circuit is not None:
+        check_against_circuit(proof, vk, circuit)
+    elif check and proof.verifier_target:
         check_recursive_artifacts(proof, vk, proof.verifier_target)
-    return {
+
+    inputs: Dict[str, Any] = {
         "verification_key": list(vk_fields),
         "proof": list(proof.fields),
         "public_inputs": list(proof.public_inputs),
-        "key_hash": kh if isinstance(kh, str) else str(kh),
     }
+    if include_key_hash:
+        kh = key_hash if key_hash is not None else (vk.key_hash or proof.vk_hash)
+        if kh is None:
+            raise ArtifactError(
+                "no verification-key hash available; pass key_hash=... explicitly "
+                "(bb writes it into vk.json / the vk_hash file), or set "
+                "include_key_hash=False if the outer circuit hardcodes it"
+            )
+        inputs["key_hash"] = kh if isinstance(kh, str) else str(kh)
+    return inputs
+
+
+def _abi_array_lengths(circuit: Any) -> Dict[str, int]:
+    """Map each array parameter name to its length in a compiled circuit's ABI."""
+    path = getattr(circuit, "circuit_json", None) or getattr(circuit, "circuit_path", None) or circuit
+    data = json.loads(Path(path).read_text())
+    out: Dict[str, int] = {}
+    for param in data.get("abi", {}).get("parameters", []):
+        ty = param.get("type", {})
+        if ty.get("kind") == "array" and "length" in ty:
+            out[param["name"]] = ty["length"]
+    return out
+
+
+def check_against_circuit(proof: Proof, vk: VerificationKey, circuit: Any) -> None:
+    """Raise if the proof/vk/public-input sizes don't fit the outer circuit's ABI.
+
+    The outer circuit's ``proof``/``verification_key``/``public_inputs`` array
+    parameters encode the exact field counts it expects; comparing against them
+    catches a bb/bb_proof_verification version mismatch without hardcoding any
+    constant. This is the version-independent counterpart to
+    :func:`check_recursive_artifacts`.
+    """
+    lengths = _abi_array_lengths(circuit)
+    problems: List[str] = []
+    checks = [
+        ("proof", proof.n_fields),
+        ("verification_key", vk.n_fields),
+        ("public_inputs", len(proof.public_inputs)),
+    ]
+    for name, actual in checks:
+        expected = lengths.get(name)
+        if expected is not None and actual is not None and actual != expected:
+            problems.append(
+                f"{name}: artifact has {actual} field(s) but the outer circuit's "
+                f"ABI expects [{name}; {expected}]"
+            )
+    if problems:
+        raise VersionError(
+            "recursive artifact sizes do not match the outer circuit's ABI — your "
+            "bb version and the outer circuit's bb_proof_verification dependency "
+            "likely disagree:\n  - " + "\n  - ".join(problems) +
+            "\nPin the outer Nargo.toml's bb_proof_verification tag to the "
+            "aztec-packages release matching your bb (see noir_bb.doctor())."
+        )
 
 
 def check_recursive_artifacts(proof: Proof, vk: VerificationKey, verifier_target: str) -> None:

@@ -1,0 +1,15 @@
+[package]
+name = "recursive"
+type = "bin"
+compiler_version = ">=1.0.0"
+
+[dependencies]
+# Pin to the aztec-packages tag matching the installed bb. The tutorial uses
+# `tag = "vX.XX.X"`; here it is the nightly tag that lines up with
+# bb 4.0.0-nightly.20260120, whose bb_proof_verification defines
+# RECURSIVE_ZK_PROOF_LENGTH = 492 + 16 = 508 and ULTRA_VK_LENGTH_IN_FIELDS = 115
+# -- exactly the artifact sizes this bb emits. If you are on a different bb,
+# run `python -m noir_bb.doctor`; noir_bb.check_recursive_artifacts compares the
+# measured proof/vk field counts against this dependency and tells you when the
+# tag no longer matches your bb.
+bb_proof_verification = { git = "https://github.com/AztecProtocol/aztec-packages/", tag = "v4.0.0-nightly.20260120", directory = "barretenberg/noir/bb_proof_verification" }
