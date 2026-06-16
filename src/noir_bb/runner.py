@@ -7,7 +7,7 @@ import os
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, Union
 
@@ -56,7 +56,6 @@ class CommandResult:
     stdout: str
     stderr: str
     duration: float = 0.0
-    extra: dict = field(default_factory=dict)
     stdout_bytes: bytes = b""
 
     @property

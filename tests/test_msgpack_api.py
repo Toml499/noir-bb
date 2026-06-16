@@ -14,7 +14,6 @@ import json
 import pytest
 
 from noir_bb import (
-    NoirProject,
     Proof,
     VerificationKey,
     acir_vk_as_fields_ultra_honk,

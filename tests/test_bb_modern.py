@@ -8,7 +8,6 @@ import pytest
 from noir_bb import (
     Barretenberg,
     NoirProject,
-    Proof,
     UltraHonkBackend,
     VerificationKey,
 )

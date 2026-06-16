@@ -44,9 +44,9 @@ def test_to_abi_value_basics():
     assert to_abi_value(True) is True
     assert to_abi_value("0xff") == "0xff"
     assert to_abi_value(b"\x01\x02") == ["1", "2"]
-    assert to_abi_value(-1) == str(BN254_FR_MODULUS - 1)
-    with pytest.raises(InputError):
-        to_abi_value(-1, wrap_negative=False)
+    # negatives are written verbatim (sign kept); nargo applies the ABI type
+    assert to_abi_value(-1) == "-1"
+    assert to_abi_value(-5) == "-5"
     with pytest.raises(InputError):
         to_abi_value(object())
 
@@ -65,7 +65,7 @@ def test_dumps_prover_toml_parses_back():
     assert parsed["x"] == "3"
     assert parsed["flag"] is False
     assert parsed["arr"] == ["1", "2", "3"]
-    assert parsed["point"] == {"x": "1", "y": str(BN254_FR_MODULUS - 1)}
+    assert parsed["point"] == {"x": "1", "y": "-1"}
     assert parsed["structs"] == [{"a": "1"}, {"a": "2"}]
 
 

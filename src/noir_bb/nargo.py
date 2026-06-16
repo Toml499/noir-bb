@@ -113,7 +113,6 @@ class NoirProject:
         *,
         witness_name: Optional[str] = None,
         prover_name: Optional[str] = None,
-        wrap_negative: bool = True,
         extra_args: Sequence[str] = (),
     ) -> ExecutionResult:
         """Write inputs to a Prover toml, run `nargo execute`, return the witness.
@@ -124,7 +123,7 @@ class NoirProject:
         """
         if inputs is not None:
             prover_name = prover_name or "Prover_noirbb"
-            toml_text = dumps_prover_toml(inputs, wrap_negative=wrap_negative)
+            toml_text = dumps_prover_toml(inputs)
             (self.path / f"{prover_name}.toml").write_text(toml_text)
         witness_name = witness_name or self.name
         args = ["execute", witness_name, *self._pkg_args(), *extra_args]

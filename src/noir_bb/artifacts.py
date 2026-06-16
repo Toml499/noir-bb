@@ -46,6 +46,9 @@ class VerificationKey:
     scheme: Optional[str] = None
     bytes_path: Optional[Path] = None
     json_path: Optional[Path] = None
+    verifier_target: Optional[str] = None
+    #: Raw vk bytes from the msgpack API, fed back into CircuitProve/CircuitVerify.
+    _bytes: Optional[bytes] = field(default=None, repr=False)
 
     @classmethod
     def load(cls, directory: Path | str) -> "VerificationKey":

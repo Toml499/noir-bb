@@ -64,32 +64,35 @@ def fields_to_bytes(fields: Iterable[str | int]) -> bytes:
 # Prover.toml serialisation
 # ---------------------------------------------------------------------------
 
-def to_abi_value(value: Any, *, wrap_negative: bool = True) -> Any:
+def to_abi_value(value: Any) -> Any:
     """Convert a Python value into its Prover.toml representation.
 
-    int   -> decimal string (negatives reduced mod the BN254 scalar field)
+    int   -> decimal string, written verbatim (negatives keep their sign)
     bool  -> TOML boolean
     str   -> passed through (use for 0x-hex or pre-formatted values)
     bytes -> list of per-byte decimal strings (matches Noir ``[u8; N]``)
     list  -> array (recursively encoded)
     dict  -> table / struct (recursively encoded)
+
+    Values are written as-is and left for nargo to interpret against the
+    circuit's ABI: ``-5`` works for a signed integer and is reduced mod the
+    field for a ``Field``, and nargo reports a clear error when a value does
+    not fit its declared type. (For encoding actual field elements -- proofs,
+    vk fields, recursion inputs -- use :func:`to_hex_field`, which does reduce
+    mod the BN254 scalar field.)
     """
     if isinstance(value, bool):  # before int: bool is a subclass of int
         return value
     if isinstance(value, int):
-        if value < 0:
-            if not wrap_negative:
-                raise InputError(f"negative integer {value} (wrap_negative=False)")
-            value %= BN254_FR_MODULUS
         return str(value)
     if isinstance(value, str):
         return value
     if isinstance(value, (bytes, bytearray)):
         return [str(b) for b in value]
     if isinstance(value, Mapping):
-        return {str(k): to_abi_value(v, wrap_negative=wrap_negative) for k, v in value.items()}
+        return {str(k): to_abi_value(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [to_abi_value(v, wrap_negative=wrap_negative) for v in value]
+        return [to_abi_value(v) for v in value]
     raise InputError(
         f"cannot encode {type(value).__name__} into Prover.toml "
         f"(value: {value!r}); use int, bool, str, bytes, list or dict"
@@ -114,13 +117,13 @@ def _toml_value(value: Any) -> str:
     return _toml_scalar(value)
 
 
-def dumps_prover_toml(inputs: Mapping[str, Any], *, wrap_negative: bool = True) -> str:
+def dumps_prover_toml(inputs: Mapping[str, Any]) -> str:
     """Serialise a dict of circuit inputs into Prover.toml text.
 
     Top-level dicts become ``[name]`` tables (Noir structs); everything else is
     rendered inline. Nested dicts inside arrays use inline tables.
     """
-    encoded = {str(k): to_abi_value(v, wrap_negative=wrap_negative) for k, v in inputs.items()}
+    encoded = {str(k): to_abi_value(v) for k, v in inputs.items()}
     lines: list[str] = []
     tables: list[tuple[str, dict]] = []
     for key, val in encoded.items():

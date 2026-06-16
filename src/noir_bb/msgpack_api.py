@@ -35,7 +35,6 @@ import base64
 import gzip
 import json
 import struct
-from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
@@ -219,14 +218,13 @@ class MsgpackBackend:
     compute_vk = get_verification_key
 
     def _vk_from_response(self, body: dict, target: str) -> VerificationKey:
-        vk = VerificationKey(
+        return VerificationKey(
             directory=Path("."),
             fields=[_field_hex(f) for f in body.get("fields", [])] or None,
             key_hash=_field_hex(body["hash"]) if body.get("hash") else None,
+            verifier_target=target,
+            _bytes=bytes(body["bytes"]),
         )
-        vk._bytes = bytes(body["bytes"])  # raw vk, fed back into CircuitProve/Verify
-        vk.verifier_target = target
-        return vk
 
     # -- CircuitProve  (bb.js generateProof) ---------------------------------
     def generate_proof(
@@ -268,7 +266,7 @@ class MsgpackBackend:
         verifier_target: Optional[str] = None,
     ) -> bool:
         vk = vk or proof.vk
-        if vk is None or getattr(vk, "_bytes", None) is None:
+        if vk is None or vk._bytes is None:
             raise ArtifactError(
                 "verify_proof needs the binary verification key; pass vk= or use "
                 "a proof produced by this backend's generate_proof()"
@@ -288,7 +286,7 @@ class MsgpackBackend:
         out.mkdir(parents=True, exist_ok=True)
         (out / "proof_fields.json").write_text(json.dumps(proof.fields))
         (out / "public_inputs_fields.json").write_text(json.dumps(proof.public_inputs))
-        if getattr(vk, "_bytes", None) is not None:
+        if vk._bytes is not None:
             (out / "vk").write_bytes(vk._bytes)
             vk.bytes_path = out / "vk"
         if vk.fields:
