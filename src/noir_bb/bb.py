@@ -184,25 +184,42 @@ class Barretenberg:
         self,
         circuit: PathLike,
         witness: PathLike,
-        out_dir: PathLike,
+        out_dir: Optional[PathLike] = None,
         *,
         vk: Union[VerificationKey, PathLike, None] = None,
         verifier_target: str = "noir-recursive",
         output_format: Optional[str] = None,
         write_vk: Optional[bool] = None,
         self_verify: bool = False,
+        stream: Optional[bool] = None,
         extra_args: Sequence[str] = (),
     ) -> Proof:
         """Generate a proof; returns a :class:`Proof` with ``.vk`` populated.
 
-        ``vk`` passes a precomputed verification key (from :meth:`write_vk`)
-        to ``bb prove -k`` — the fast path on bb >= 4.x, which otherwise has
-        to recompute the key while proving. With ``write_vk=None`` (auto) and
-        no ``vk``, ``--write_vk`` is added whenever the binary supports it:
-        bb >= 4.x refuses to prove without one or the other, and the emitted
-        key feeds ``verify()`` / recursion without a separate write_vk() run.
+        ``prove(..., write_vk=True)`` is the single-pass, lowest-peak-memory and
+        fastest path: one ``bb`` process derives the proving key once and emits
+        both the proof and the verification key. With ``write_vk=None`` (auto)
+        and no ``vk``, ``--write_vk`` is added whenever the binary supports it,
+        since bb >= 4.x refuses to prove without either a vk or ``--write_vk``,
+        and the emitted key feeds ``verify()`` / recursion without a separate
+        :meth:`write_vk` run.
+
+        Passing ``vk`` (a precomputed verification key, via ``bb prove -k``) does
+        **not** avoid proving-key derivation — ``-k`` supplies only the
+        *verification* key, and ``prove`` still builds the full proving key.
+        Prefer it only when you already have a vk on disk and explicitly want to
+        skip re-deriving that **vk** artifact; splitting :meth:`write_vk` +
+        ``prove(vk=...)`` otherwise builds the (potentially huge) proving key
+        twice.
+
+        ``out_dir`` defaults to the directory holding ``circuit`` — i.e.
+        ``PROJECTNAME/target`` for a standard Noir project layout.
+
+        ``stream`` controls output handling; it defaults to ``True`` here because
+        proving is long-running. Streamed output goes live to the terminal and is
+        never buffered in this process (see :func:`noir_bb.runner.run`).
         """
-        out = Path(out_dir)
+        out = Path(out_dir) if out_dir is not None else Path(circuit).parent
         out.mkdir(parents=True, exist_ok=True)
         cmd = [self.bin, "prove", "-b", str(circuit), "-w", str(witness), "-o", str(out)]
         vk_path: Optional[Path] = None
@@ -229,7 +246,8 @@ class Barretenberg:
         if self_verify and self._supports("prove", "--verify"):
             cmd += ["--verify"]
         cmd += list(extra_args)
-        run(cmd, timeout=self.timeout, verbose=self.verbose)
+        run(cmd, timeout=self.timeout, verbose=self.verbose,
+            stream=True if stream is None else stream)
         proof = Proof.load(out, verifier_target=verifier_target)
         if write_vk:
             proof.vk = VerificationKey.load(out)
@@ -250,8 +268,16 @@ class Barretenberg:
         *,
         verifier_target: str = "noir-recursive",
         output_format: Optional[str] = None,
+        stream: Optional[bool] = None,
         extra_args: Sequence[str] = (),
     ) -> VerificationKey:
+        """Derive the verification key for ``circuit``.
+
+        Like :meth:`prove`, ``stream`` defaults to ``True`` (this is a long,
+        memory-heavy operation): output streams live to the terminal rather than
+        being buffered here. The key is read back from disk, so nothing depends on
+        captured stdout.
+        """
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         cmd = [self.bin, "write_vk", "-b", str(circuit), "-o", str(out)]
@@ -259,7 +285,8 @@ class Barretenberg:
         cmd += self._target_args("write_vk", verifier_target)
         cmd += self._format_args("write_vk", output_format)
         cmd += list(extra_args)
-        run(cmd, timeout=self.timeout, verbose=self.verbose)
+        run(cmd, timeout=self.timeout, verbose=self.verbose,
+            stream=True if stream is None else stream)
         return VerificationKey.load(out)
 
     def verify(

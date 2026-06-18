@@ -6,7 +6,10 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, Union
@@ -102,6 +105,10 @@ def run_binary(
     return result
 
 
+#: How many trailing stderr lines a streamed run keeps for error reporting.
+_STREAM_STDERR_TAIL = 200
+
+
 def run(
     cmd: Sequence[PathLike],
     *,
@@ -110,13 +117,26 @@ def run(
     check: bool = True,
     env: Optional[Mapping[str, str]] = None,
     verbose: bool = False,
+    stream: bool = False,
 ) -> CommandResult:
-    """Run a command, capturing output. Raises CommandError on failure when check=True."""
+    """Run a command, capturing output. Raises CommandError on failure when check=True.
+
+    With ``stream=True`` the child inherits the parent's stdout and its stderr is
+    teed live to the parent's stderr, so long-running commands (notably ``bb prove``
+    / ``write_vk``) show progress immediately and the parent never buffers the whole
+    log stream in memory. Nothing is captured, so the returned
+    :class:`CommandResult` has empty ``stdout``/``stderr``; on failure a bounded tail
+    of stderr (last ``_STREAM_STDERR_TAIL`` lines) is attached to the raised
+    :class:`CommandError`. ``verbose`` is ignored when streaming (output is already
+    shown live).
+    """
     argv = [str(c) for c in cmd]
-    log.debug("running: %s (cwd=%s)", " ".join(argv), cwd)
+    log.debug("running: %s (cwd=%s, stream=%s)", " ".join(argv), cwd, stream)
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
+    if stream:
+        return _run_streaming(argv, cwd=cwd, timeout=timeout, check=check, env=full_env)
     start = time.monotonic()
     try:
         proc = subprocess.run(
@@ -144,5 +164,68 @@ def run(
             f"`{Path(argv[0]).name} {argv[1] if len(argv) > 1 else ''}` failed",
             cmd=argv, returncode=proc.returncode,
             stdout=proc.stdout, stderr=proc.stderr,
+        )
+    return result
+
+
+def _run_streaming(
+    argv: list[str],
+    *,
+    cwd: Optional[PathLike],
+    timeout: Optional[float],
+    check: bool,
+    env: Mapping[str, str],
+) -> CommandResult:
+    """Stream a child's output to the terminal, keeping only a bounded stderr tail.
+
+    stdout is inherited (written straight to our stdout, never buffered here);
+    stderr is read line-by-line on a reader thread, echoed live to ``sys.stderr``
+    and retained as a short rolling tail for error reporting.
+    """
+    start = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(cwd) if cwd else None,
+            env=dict(env),
+            stdout=None,  # inherit: stream live, no parent-side buffering
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # line-buffered
+        )
+    except FileNotFoundError as exc:
+        raise ToolNotFoundError(f"Executable not found: {argv[0]}") from exc
+
+    tail: deque[str] = deque(maxlen=_STREAM_STDERR_TAIL)
+
+    def _drain() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+            tail.append(line)
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        proc.wait()
+        reader.join()
+        raise CommandError(
+            f"Command timed out after {timeout}s", cmd=argv, returncode=None,
+            stdout="", stderr="".join(tail),
+        ) from exc
+    reader.join()
+
+    duration = time.monotonic() - start
+    result = CommandResult(argv, proc.returncode, "", "", duration)
+    log.debug("finished in %.2fs (rc=%d, streamed)", duration, proc.returncode)
+    if check and proc.returncode != 0:
+        raise CommandError(
+            f"`{Path(argv[0]).name} {argv[1] if len(argv) > 1 else ''}` failed",
+            cmd=argv, returncode=proc.returncode,
+            stdout="", stderr="".join(tail),
         )
     return result

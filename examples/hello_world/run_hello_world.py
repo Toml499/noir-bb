@@ -9,7 +9,7 @@ def main() -> None:
     print(f"witness : {w.witness_path}")
 
     # 2. prove the circuit and verify the proof
-    proof = bb.prove(w.circuit_path, w.witness_path, "hello_world/target")
+    proof = bb.prove(w.circuit_path, w.witness_path)
     print(f"proof   : {proof.summary()}")
     print(f"verification: {bb.verify(proof, proof.vk)}")
 
